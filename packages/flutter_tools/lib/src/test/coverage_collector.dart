@@ -17,9 +17,16 @@ import '../vmservice.dart';
 import 'test_device.dart';
 import 'watcher.dart';
 
+int __time = DateTime.now().microsecondsSinceEpoch;
+void _log(String msg) {
+  // globals.printError("    ${(1e-6 * (DateTime.now().microsecondsSinceEpoch - __time)).toStringAsFixed(3)}\t\t$msg");
+}
+
 /// A class that's used to collect coverage data during tests.
 class CoverageCollector extends TestWatcher {
-  CoverageCollector({this.libraryPredicate, this.verbose = true, @required this.packagesPath});
+  CoverageCollector({this.libraryPredicate, this.verbose = true, @required this.packagesPath}) {
+    _log("Test started");
+  }
 
   final bool verbose;
   final String packagesPath;
@@ -29,7 +36,11 @@ class CoverageCollector extends TestWatcher {
   @override
   Future<void> handleFinishedTest(TestDevice testDevice) async {
     _logMessage('Starting coverage collection');
+    _log("Starting coverage collection");
     await collectCoverage(testDevice);
+    _log("Finished coverage collection");
+    // var logfile = globals.fs.file("/usr/local/google/home/liama/logs/blep-${DateTime.now().microsecondsSinceEpoch}.txt");
+    // await logfile.writeAsString("BBBBBBBBBBBB flutter collect coverage");
   }
 
   void _logMessage(String line, { bool error = false }) {
@@ -95,13 +106,13 @@ class CoverageCollector extends TestWatcher {
 
     final Future<void> collectionComplete = testDevice.observatoryUri
       .then((Uri observatoryUri) {
-        _logMessage('collecting coverage data from $testDevice at $observatoryUri...');
+        _log('  Collecting coverage data from $testDevice at $observatoryUri...');
         return collect(observatoryUri, libraryPredicate)
           .then<void>((Map<String, dynamic> result) {
             if (result == null) {
               throw Exception('Failed to collect coverage.');
             }
-            _logMessage('Collected coverage data.');
+            _log('  Collected coverage data from $testDevice at $observatoryUri.');
             data = result;
           });
       });
@@ -109,13 +120,13 @@ class CoverageCollector extends TestWatcher {
     await Future.any<void>(<Future<void>>[ processComplete, collectionComplete ]);
     assert(data != null);
 
-    _logMessage('Merging coverage data...');
+    _log('Merging coverage data...');
     _addHitmap(await coverage.createHitmap(
       data['coverage'] as List<Map<String, dynamic>>,
       packagesPath: packagesPath,
       checkIgnoredLines: true,
     ));
-    _logMessage('Done merging coverage data into global coverage map.');
+    _log('Done merging coverage data into global coverage map.');
   }
 
   /// Returns a future that will complete with the formatted coverage data
@@ -130,6 +141,7 @@ class CoverageCollector extends TestWatcher {
     if (_globalHitmap == null) {
       return null;
     }
+    _log('finalizeCoverage...');
     if (formatter == null) {
       final coverage.Resolver resolver = coverage.Resolver(packagesPath: packagesPath);
       final String packagePath = globals.fs.currentDirectory.path;
@@ -140,6 +152,7 @@ class CoverageCollector extends TestWatcher {
     }
     final String result = await formatter.format(_globalHitmap);
     _globalHitmap = null;
+    _log('finalizeCoverage DONE');
     return result;
   }
 
@@ -147,8 +160,10 @@ class CoverageCollector extends TestWatcher {
     final String coverageData = await finalizeCoverage(
       coverageDirectory: coverageDirectory,
     );
+    _log('collectCoverageData...');
     _logMessage('coverage information collection complete');
     if (coverageData == null) {
+      _log('collectCoverageData DONE 0');
       return false;
     }
 
@@ -161,6 +176,7 @@ class CoverageCollector extends TestWatcher {
     if (mergeCoverageData) {
       if (!globals.fs.isFileSync(baseCoverageData)) {
         _logMessage('Missing "$baseCoverageData". Unable to merge coverage data.', error: true);
+        _log('collectCoverageData DONE 1');
         return false;
       }
 
@@ -172,6 +188,7 @@ class CoverageCollector extends TestWatcher {
           installMessage = 'Consider running "brew install lcov".';
         }
         _logMessage('Missing "lcov" tool. Unable to merge coverage data.\n$installMessage', error: true);
+        _log('collectCoverageData DONE 2');
         return false;
       }
 
@@ -185,12 +202,14 @@ class CoverageCollector extends TestWatcher {
           '--output-file', coverageFile.path,
         ]);
         if (result.exitCode != 0) {
+          _log('collectCoverageData DONE 3');
           return false;
         }
       } finally {
         tempDir.deleteSync(recursive: true);
       }
     }
+    _log('collectCoverageData DONE 4');
     return true;
   }
 
@@ -218,14 +237,19 @@ Future<Map<String, dynamic>> collect(Uri serviceUri, bool Function(String) libra
   return result;
 }
 
+final _scriptFutures = <String, Future<vm_service.Obj>>{};
+final _scripts = <String, vm_service.Script>{};
+
 Future<Map<String, dynamic>> _getAllCoverage(
   vm_service.VmService service,
   bool Function(String) libraryPredicate,
   bool forceSequential,
 ) async {
+  _log('collecting... 0');
   final vm_service.VM vm = await service.getVM();
   final List<Map<String, dynamic>> coverage = <Map<String, dynamic>>[];
   for (final vm_service.IsolateRef isolateRef in vm.isolates) {
+  _log('collecting... 1');
     if (isolateRef.isSystemIsolate) {
       continue;
     }
@@ -235,6 +259,7 @@ Future<Map<String, dynamic>> _getAllCoverage(
     } on vm_service.SentinelException {
       continue;
     }
+  _log('collecting... 2');
 
     final List<Future<void>> futures = <Future<void>>[];
     final Map<String, vm_service.Script> scripts = <String, vm_service.Script>{};
@@ -242,6 +267,7 @@ Future<Map<String, dynamic>> _getAllCoverage(
     // For each ScriptRef loaded into the VM, load the corresponding Script and
     // SourceReport object.
 
+  _log('scriptList.scripts: ${scriptList.scripts.length}');
     for (final vm_service.ScriptRef script in scriptList.scripts) {
       final String libraryUri = script.uri;
       if (!libraryPredicate(libraryUri)) {
@@ -260,14 +286,28 @@ Future<Map<String, dynamic>> _getAllCoverage(
       if (forceSequential) {
         await null;
       }
-      final Future<void> getObject = service
-        .getObject(isolateRef.id, scriptId)
-        .then((vm_service.Obj response) {
-          final vm_service.Script script = response as vm_service.Script;
-          scripts[scriptId] = script;
-        });
       futures.add(getSourceReport);
-      futures.add(getObject);
+      if (_scripts.containsKey(scriptId)) {
+        scripts[scriptId] = _scripts[scriptId];
+        // _log('HIT $scriptId');
+      } else {
+        Future<vm_service.Obj> getObject;
+        if (_scriptFutures.containsKey(scriptId)) {
+          getObject = _scriptFutures[scriptId];
+          // _log('FUTURE $scriptId');
+        } else {
+          // _log('CACHE MISS $scriptId');
+          getObject = service.getObject(isolateRef.id, scriptId);
+          _scriptFutures[scriptId] = getObject;
+        }
+
+        Future<void> getScript = getObject.then((vm_service.Obj response) {
+              vm_service.Script script = response as vm_service.Script;
+              _scripts[scriptId] = script;
+              scripts[scriptId] = script;
+            });
+        futures.add(getScript);
+      }
     }
     await Future.wait(futures);
     _buildCoverageMap(scripts, sourceReports, coverage);
@@ -280,9 +320,10 @@ void _buildCoverageMap(
   Map<String, vm_service.Script> scripts,
   Map<String, vm_service.SourceReport> sourceReports,
   List<Map<String, dynamic>> coverage,
-) {
+) async {
   final Map<String, Map<int, int>> hitMaps = <String, Map<int, int>>{};
   for (final String scriptId in scripts.keys) {
+    _log("DDDDDDD scriptID: $scriptId");
     final vm_service.SourceReport sourceReport = sourceReports[scriptId];
     for (final vm_service.SourceReportRange range in sourceReport.ranges) {
       final vm_service.SourceReportCoverage coverage = range.coverage;
@@ -297,7 +338,8 @@ void _buildCoverageMap(
       final Map<int, int> hitMap = hitMaps[uri];
       final List<int> hits = coverage.hits;
       final List<int> misses = coverage.misses;
-      final List<dynamic> tokenPositions = scripts[scriptRef.id].tokenPosTable;
+      final vm_service.Script script = scripts[scriptRef.id];
+      final List<dynamic> tokenPositions = script.tokenPosTable;
       // The token positions can be null if the script has no lines that may be covered.
       if (tokenPositions == null) {
         continue;
