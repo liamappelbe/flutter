@@ -229,34 +229,24 @@ Future<Map<String, dynamic>> _getAllCoverage(
     if (isolateRef.isSystemIsolate) {
       continue;
     }
-    vm_service.ScriptList scriptList;
-    try {
-      scriptList = await service.getScripts(isolateRef.id);
-    } on vm_service.SentinelException {
-      continue;
-    }
 
     final List<Future<void>> futures = <Future<void>>[];
     final Map<String, vm_service.Script> scripts = <String, vm_service.Script>{};
-    final Map<String, vm_service.SourceReport> sourceReports = <String, vm_service.SourceReport>{};
     // For each ScriptRef loaded into the VM, load the corresponding Script and
     // SourceReport object.
 
-    for (final vm_service.ScriptRef script in scriptList.scripts) {
+    final vm_service.SourceReport sourceReport = await service.getSourceReport(
+      isolateRef.id,
+      <String>['Coverage'],
+      forceCompile: true,
+    );
+
+    for (final vm_service.ScriptRef script in sourceReport.scripts) {
       final String libraryUri = script.uri;
       if (!libraryPredicate(libraryUri)) {
         continue;
       }
       final String scriptId = script.id;
-      final Future<void> getSourceReport = service.getSourceReport(
-        isolateRef.id,
-        <String>['Coverage'],
-        scriptId: scriptId,
-        forceCompile: true,
-      )
-      .then((vm_service.SourceReport report) {
-        sourceReports[scriptId] = report;
-      });
       if (forceSequential) {
         await null;
       }
@@ -266,11 +256,10 @@ Future<Map<String, dynamic>> _getAllCoverage(
           final vm_service.Script script = response as vm_service.Script;
           scripts[scriptId] = script;
         });
-      futures.add(getSourceReport);
       futures.add(getObject);
     }
     await Future.wait(futures);
-    _buildCoverageMap(scripts, sourceReports, coverage);
+    _buildCoverageMap(scripts, sourceReport, coverage);
   }
   return <String, dynamic>{'type': 'CodeCoverage', 'coverage': coverage};
 }
@@ -278,42 +267,46 @@ Future<Map<String, dynamic>> _getAllCoverage(
 // Build a hitmap of Uri -> Line -> Hit Count for each script object.
 void _buildCoverageMap(
   Map<String, vm_service.Script> scripts,
-  Map<String, vm_service.SourceReport> sourceReports,
+  vm_service.SourceReport sourceReport,
   List<Map<String, dynamic>> coverage,
 ) {
   final Map<String, Map<int, int>> hitMaps = <String, Map<int, int>>{};
-  for (final String scriptId in scripts.keys) {
-    final vm_service.SourceReport sourceReport = sourceReports[scriptId];
-    for (final vm_service.SourceReportRange range in sourceReport.ranges) {
-      final vm_service.SourceReportCoverage coverage = range.coverage;
-      // Coverage reports may sometimes be null for a Script.
-      if (coverage == null) {
-        continue;
-      }
-      final vm_service.ScriptRef scriptRef = sourceReport.scripts[range.scriptIndex];
-      final String uri = scriptRef.uri;
+  for (final vm_service.SourceReportRange range in sourceReport.ranges) {
+    final vm_service.SourceReportCoverage coverage = range.coverage;
+    // Coverage reports may sometimes be null for a Script.
+    if (coverage == null) {
+      continue;
+    }
 
-      hitMaps[uri] ??= <int, int>{};
-      final Map<int, int> hitMap = hitMaps[uri];
-      final List<int> hits = coverage.hits;
-      final List<int> misses = coverage.misses;
-      final List<dynamic> tokenPositions = scripts[scriptRef.id].tokenPosTable;
-      // The token positions can be null if the script has no lines that may be covered.
-      if (tokenPositions == null) {
-        continue;
+    final vm_service.ScriptRef scriptRef = sourceReport.scripts[range.scriptIndex];
+    final vm_service.Script script = scripts[scriptRef.id];
+    if (script == null) {
+      // If the script isn't in the scripts map, it means it was filtered out by
+      // the library predicate.
+      continue;
+    }
+
+    final String uri = scriptRef.uri;
+    hitMaps[uri] ??= <int, int>{};
+    final Map<int, int> hitMap = hitMaps[uri];
+    final List<int> hits = coverage.hits;
+    final List<int> misses = coverage.misses;
+    final List<dynamic> tokenPositions = script.tokenPosTable;
+    // The token positions can be null if the script has no lines that may be covered.
+    if (tokenPositions == null) {
+      continue;
+    }
+    if (hits != null) {
+      for (final int hit in hits) {
+        final int line = _lineAndColumn(hit, tokenPositions)[0];
+        final int current = hitMap[line] ?? 0;
+        hitMap[line] = current + 1;
       }
-      if (hits != null) {
-        for (final int hit in hits) {
-          final int line = _lineAndColumn(hit, tokenPositions)[0];
-          final int current = hitMap[line] ?? 0;
-          hitMap[line] = current + 1;
-        }
-      }
-      if (misses != null) {
-        for (final int miss in misses) {
-          final int line = _lineAndColumn(miss, tokenPositions)[0];
-          hitMap[line] ??= 0;
-        }
+    }
+    if (misses != null) {
+      for (final int miss in misses) {
+        final int line = _lineAndColumn(miss, tokenPositions)[0];
+        hitMap[line] ??= 0;
       }
     }
   }
